@@ -25,8 +25,9 @@ from litert_vs_llamacpp.prompts import (
     SYSTEM_PROMPT,
 )
 
-# Full prefill ladder avoids padded-chunk overhead on variable-length news articles.
-PREFILL_LENGTHS = "1024,512,256,128,64,32,16,8,4,2,1"
+# Compact prefill ladder avoids padded-chunk overhead on variable-length news articles
+# while keeping GPU init fast (~1.6s) and export time reasonable.
+PREFILL_LENGTHS = "1024,512,256,128,64,16,1"
 CACHE_LENGTH = 4096
 
 # Per google-ai-edge/litert-samples/models/conversion.md:
@@ -206,6 +207,9 @@ sys.argv = [
     "--output_dir", {str(output_dir)!r},
     "--prefill_lengths", {prefill_lengths!r},
     "--cache_length", {str(cache_length)!r},
+    "--apply_gpu_composites", "True",
+    "--use_qkv_norm_rope_composite", "False",
+    "--prefill_logits", "False",
     "--use_jinja_template", "False",
     "--bundle_litert_lm", "True",
     "--quantization_recipe", {recipe_arg!r},
