@@ -61,6 +61,52 @@ INT4_BLOCK32_RECIPE = [
     },
 ]
 
+# Calibrated INT4 recipe (Issue #1): exact grid recovery for fake-quantized decoder
+# linears (GPTQ + H-CD + RMSNorm KL QAT) + channelwise INT8 on tied embed_tokens/lm_head.
+# Later rules have higher priority in ai_edge_quantizer RecipeManager.
+INT4_RECOVERY_RECIPE = [
+    {
+        "regex": ".*",
+        "operation": "FULLY_CONNECTED",
+        "algorithm_key": "dequantized_weight_recovery",
+        "op_config": {
+            "weight_tensor_config": {
+                "num_bits": 4,
+                "granularity": "BLOCKWISE_32",
+                "symmetric": True,
+            },
+            "compute_precision": "INTEGER",
+            "skip_checks": False,
+        },
+    },
+    {
+        "regex": ".*Linear_lm_head.*",
+        "operation": "FULLY_CONNECTED",
+        "algorithm_key": "min_max_uniform_quantize",
+        "op_config": {
+            "weight_tensor_config": {
+                "num_bits": 8,
+                "granularity": "CHANNELWISE",
+                "symmetric": True,
+            },
+            "compute_precision": "INTEGER",
+        },
+    },
+    {
+        "regex": ".*",
+        "operation": "EMBEDDING_LOOKUP",
+        "algorithm_key": "min_max_uniform_quantize",
+        "op_config": {
+            "weight_tensor_config": {
+                "num_bits": 8,
+                "granularity": "CHANNELWISE",
+                "symmetric": True,
+            },
+            "compute_precision": "INTEGER",
+        },
+    },
+]
+
 
 def export_bundle(
     model_id: str,
@@ -79,13 +125,66 @@ def export_bundle(
         recipe_file = output_dir / "int4_block32_octav.json"
         recipe_file.write_text(json.dumps(INT4_BLOCK32_RECIPE, indent=2) + "\n", encoding="utf-8")
         recipe_arg = str(recipe_file)
+    elif quant == "int4-cal":
+        recipe_file = output_dir / "int4_block32_recovery.json"
+        recipe_file.write_text(json.dumps(INT4_RECOVERY_RECIPE, indent=2) + "\n", encoding="utf-8")
+        recipe_arg = str(recipe_file)
     elif quant != "int8":
-        raise ValueError(f"Unsupported quant: {quant!r} (expected 'int8' or 'int4')")
+        raise ValueError(f"Unsupported quant: {quant!r} (expected 'int8', 'int4', or 'int4-cal')")
 
-    # Subprocess ensures litert_torch is imported before transformers model modules
-    # and lets us cleanly swap the vendor Jinja template for the minimal Granite 4.0 template.
+    # Subprocess ensures litert_torch is imported before transformers model modules,
+    # shims litert-torch 0.10.0's stray tensorflow.lite.python.schema_py_generated
+    # import in unused image-gen extensions when TensorFlow isn't installed,
+    # and cleanly swaps the vendor Jinja template for the minimal Granite 4.0 template.
     driver = f"""
+import importlib.machinery
+import importlib.util
 import sys
+import types
+
+if importlib.util.find_spec("tensorflow") is None:
+    from ai_edge_litert import schema_py_generated as _schema_fb
+    def _mk_pkg(name):
+        mod = types.ModuleType(name)
+        mod.__path__ = []
+        mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
+        return mod
+    _tf = _mk_pkg("tensorflow")
+    _tf_lite = _mk_pkg("tensorflow.lite")
+    _tf_lite_py = _mk_pkg("tensorflow.lite.python")
+    _tf_lite_py.schema_py_generated = _schema_fb
+    _tf_lite.python = _tf_lite_py
+    _tf.lite = _tf_lite
+    sys.modules["tensorflow"] = _tf
+    sys.modules["tensorflow.lite"] = _tf_lite
+    sys.modules["tensorflow.lite.python"] = _tf_lite_py
+    sys.modules["tensorflow.lite.python.schema_py_generated"] = _schema_fb
+
+import litert_lm_builder as _lmb
+if not hasattr(_lmb, "TfLiteModelType"):
+    class _TfLiteModelTypeCompat:
+        PREFILL_DECODE = "prefill_decode"
+        EMBEDDER = "embedder"
+        PER_LAYER_EMBEDDER = "per_layer_embedder"
+        VISION_ENCODER = "vision_encoder"
+        VISION_ADAPTER = "vision_adapter"
+        END_OF_VISION = "end_of_vision"
+        AUDIO_ENCODER_HW = "audio_encoder_hw"
+        AUDIO_ADAPTER = "audio_adapter"
+        END_OF_AUDIO = "end_of_audio"
+        AUX = "aux"
+    _lmb.TfLiteModelType = _TfLiteModelTypeCompat
+    _lmb.litertlm_builder.TfLiteModelType = _TfLiteModelTypeCompat
+
+# Granite 4.0 uses muP (embedding_multiplier=12, logits_scaling=8) which overflows
+# LiteRT WebGPU/Metal's default FP16 activations. Default to FP32 activations.
+_orig_add_tflite = _lmb.LitertLmFileBuilder.add_tflite_model
+def _patched_add_tflite(self, tflite_model_path, model_type, *args, **kwargs):
+    if kwargs.get("prefer_activation_type") is None and str(model_type).lower().endswith("prefill_decode"):
+        kwargs["prefer_activation_type"] = "fp32"
+    return _orig_add_tflite(self, tflite_model_path, model_type, *args, **kwargs)
+_lmb.LitertLmFileBuilder.add_tflite_model = _patched_add_tflite
+
 from transformers import AutoTokenizer
 
 MINIMAL_TEMPLATE = {GRANITE4_MINIMAL_CHAT_TEMPLATE!r}
@@ -210,9 +309,9 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, default=Path("models/litertlm"))
     parser.add_argument(
         "--quant",
-        choices=["int8", "int4", "all"],
+        choices=["int8", "int4", "int4-cal", "all"],
         default="all",
-        help="Which quantization(s) to export (default: all = both int8 and int4).",
+        help="Which quantization(s) to export ('all' = stock int8 + int4; 'int4-cal' = calibrated recovery).",
     )
     parser.add_argument("--cache-length", type=int, default=CACHE_LENGTH)
     parser.add_argument("--prefill-lengths", default=PREFILL_LENGTHS)

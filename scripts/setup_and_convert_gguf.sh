@@ -59,14 +59,18 @@ from huggingface_hub import snapshot_download
 snapshot_download(sys.argv[1], local_dir=sys.argv[2])
 ' "$MODEL_ID" "$HF_LOCAL_DIR"
 
-# 4. Convert HF -> F16 GGUF, then quantize to Q8_0, Q4_K_M, and Q4_0
-F16_GGUF="$OUT_DIR/granite-4.0-1b-f16.gguf"
-if [[ ! -f "$F16_GGUF" ]]; then
-  echo "=== Converting HF checkpoint -> $F16_GGUF ==="
+# 4. Convert HF -> BF16 GGUF (matching Granite 4.0's native bfloat16 weights), then quantize.
+# Granite 4.0 1B has massive SwiGLU activations (~184k in blk.4.ffn_down, ~43k in blk.39.ffn_down)
+# that overflow llama.cpp Metal's FP16 simdgroup_half8x8 mul_mm kernels (> 65504 -> inf/NaN).
+# Keeping blk.(4|39).ffn_down.weight as BF16 dispatches Metal's simdgroup_bfloat8x8 kernel
+# at full GPU speed with zero overflow.
+BF16_GGUF="$OUT_DIR/granite-4.0-1b-bf16.gguf"
+if [[ ! -f "$BF16_GGUF" ]]; then
+  echo "=== Converting HF checkpoint -> $BF16_GGUF ==="
   uv run --extra convert python "$LLAMA_CPP_DIR/convert_hf_to_gguf.py" \
     "$HF_LOCAL_DIR" \
-    --outfile "$F16_GGUF" \
-    --outtype f16
+    --outfile "$BF16_GGUF" \
+    --outtype bf16
 fi
 
 QUANT_BIN="$BUILD_DIR/bin/llama-quantize"
@@ -74,7 +78,7 @@ for QTYPE in Q8_0 Q4_K_M Q4_0; do
   TARGET="$OUT_DIR/granite-4.0-1b-${QTYPE}.gguf"
   if [[ ! -f "$TARGET" ]]; then
     echo "=== Quantizing -> $TARGET ==="
-    "$QUANT_BIN" "$F16_GGUF" "$TARGET" "$QTYPE"
+    "$QUANT_BIN" --tensor-type 'blk\.(4|39)\.ffn_down\.weight=bf16' "$BF16_GGUF" "$TARGET" "$QTYPE"
   else
     echo "Already exists: $TARGET"
   fi

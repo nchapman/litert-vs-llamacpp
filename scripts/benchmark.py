@@ -493,9 +493,14 @@ def main() -> None:
     )
     parser.add_argument("--limit", type=int, default=None, help="Limit number of examples (for quick runs).")
     parser.add_argument("--backends", default="gpu,cpu", help="Comma-separated backends: gpu,cpu")
-    parser.add_argument("--quants", default="int8,int4", help="Comma-separated quant tiers: int8,int4")
+    parser.add_argument("--quants", default="int8,int4", help="Comma-separated quant tiers: int8,int4,int4-cal")
     parser.add_argument("--litert-int8", type=Path, default=Path("models/litertlm/int8/granite-4.0-1b-int8.litertlm"))
     parser.add_argument("--litert-int4", type=Path, default=Path("models/litertlm/int4/granite-4.0-1b-int4.litertlm"))
+    parser.add_argument(
+        "--litert-int4-cal",
+        type=Path,
+        default=Path("models/litertlm/int4-cal/granite-4.0-1b-int4-cal.litertlm"),
+    )
     parser.add_argument("--gguf-int8", type=Path, default=Path("models/gguf/granite-4.0-1b-Q8_0.gguf"))
     parser.add_argument("--gguf-int4", type=Path, default=Path("models/gguf/granite-4.0-1b-Q4_K_M.gguf"))
     parser.add_argument("--llama-bin-dir", type=Path, default=Path("third_party/llama.cpp/build/bin"))
@@ -520,12 +525,20 @@ def main() -> None:
     print(f"Loaded {len(dataset)} examples from {args.dataset}")
 
     backends = _parse_csv_choices(args.backends, {"gpu", "cpu"}, "--backends", parser)
-    quants = _parse_csv_choices(args.quants, {"int8", "int4"}, "--quants", parser)
+    quants = _parse_csv_choices(args.quants, {"int8", "int4", "int4-cal"}, "--quants", parser)
 
-    litert_map = {"int8": args.litert_int8, "int4": args.litert_int4}
+    litert_map = {
+        "int8": args.litert_int8,
+        "int4": args.litert_int4,
+        "int4-cal": args.litert_int4_cal,
+    }
     gguf_map = {"int8": args.gguf_int8, "int4": args.gguf_int4}
     gguf_labels = {"int8": "Q8_0", "int4": args.gguf_int4.stem.split("granite-4.0-1b-")[-1]}
-    litert_labels = {"int8": "dynamic_wi8", "int4": "int4_block32"}
+    litert_labels = {
+        "int8": "dynamic_wi8",
+        "int4": "int4_block32",
+        "int4-cal": "int4_block32_cal",
+    }
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = args.output_dir / stamp
@@ -563,8 +576,8 @@ def main() -> None:
             else:
                 print(f"Skipping missing LiteRT-LM bundle: {lt_path}")
 
-            gguf_path = gguf_map[q]
-            if gguf_path.exists():
+            gguf_path = gguf_map.get(q)
+            if gguf_path is not None and gguf_path.exists():
                 print(f"\n>>> llama.cpp | backend={backend_name} | quant={gguf_labels[q]} ({gguf_path})")
                 lc_records, lc_meta = run_llamacpp_summarization(
                     gguf_path,
@@ -589,14 +602,14 @@ def main() -> None:
                         "predictions_path": str(pred_path),
                     }
                 )
-            else:
+            elif gguf_path is not None:
                 print(f"Skipping missing GGUF model: {gguf_path}")
 
     synthetic: list[dict[str, Any]] = []
     if args.run_synthetic:
         synthetic = run_synthetic_microbench(
-            {q: litert_map[q] for q in quants},
-            {q: gguf_map[q] for q in quants},
+            {q: litert_map[q] for q in quants if q in litert_map},
+            {q: gguf_map[q] for q in quants if q in gguf_map},
             args.llama_bin_dir,
             backends,
             hw,
