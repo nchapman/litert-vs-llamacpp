@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+models/
+data/
+runs/
+results/
+third_party/
+.cache/
+*.litertlm
+*.tflite
+*.gguf
+*.task
+*.litertlm_cache*
+*.xnnpack_cache
+.DS_Store
