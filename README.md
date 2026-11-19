@@ -12,14 +12,15 @@ Full results (8-bit, stock OCTAV, unoptimized baselines, synthetic benchmarks, m
 | **GPU** | **LiteRT-LM** | `int4-cal` | 992.5 | 2,458 | **151.0** | 363 | **96.3** | **0.319 / 0.134 / 0.203** |
 | **GPU** | **llama.cpp** | `Q4_K_M` | 995.1 | **2,666** | 102.6 | **348** | 146.6 | 0.298 / 0.124 / 0.192 |
 | **CPU** | **llama.cpp** | `Q4_K_M` | 995.1 | **433** | **84.9** | **2,114** | **267.2** | 0.301 / 0.119 / 0.195 |
-| **CPU** | **LiteRT-LM** | `int4-cal` | 1,006.7 | 396 | 28.3 | 2,328 | 514.6 | **0.326 / 0.141 / 0.209** |
+| **CPU** | **LiteRT-LM** | `int4-cal`¹ | 1,006.7 | 396 | 28.3 | 2,328 | 514.6 | **0.326 / 0.141 / 0.209** |
 
-*Median prefill, decode, and TTFT across 50 articles; wall time is total time for all 50 articles. CPU runs pinned to 12 P-cores.*
+*Median prefill, decode, and TTFT across 50 articles; wall time is total time for all 50 articles. CPU runs pinned to 12 P-cores.*  
+*¹ LiteRT-LM `0.19.2` on macOS runs CPU via XNNPACK (~240 partitions/token; Google's newer [YNNPACK](https://developers.google.com/edge/litert/releases/litert_aug) CPU delegate is currently Linux ARM64 only). This ~28 tok/s decode ceiling matches Google's own M4 Max CPU benchmarks for LiteRT-LM (`24–31 tok/s` across 2B–3B models).*
 
 ## Key Takeaways
 
 - **GPU:** LiteRT-LM (`int4-cal` with `--apply_gpu_composites True`) was **1.52× faster end-to-end** (`96.3 s` vs `146.6 s`, `151` vs `103 tok/s` decode) with higher ROUGE than `llama.cpp Q4_K_M`.
-- **CPU:** `llama.cpp` was **3.0× faster on decode** (`84.9` vs `28.3 tok/s`) and **1.9× faster overall**. On macOS `0.19.2`, LiteRT-LM's XNNPACK backend does not delegate several attention/KV-cache ops and YNNPACK is not linked.
+- **CPU:** `llama.cpp` was **3.0× faster on decode** (`84.9` vs `28.3 tok/s`) and **1.9× faster overall** (`267.2 s` vs `514.6 s`).
 - **Setup note:** Both runtimes required FP16-overflow workarounds for Granite 4.0 1B (`prefer_activation_type="fp32"` in LiteRT-LM; BF16 `ffn_down` on layers 4 and 39 in `llama.cpp`). LiteRT-LM also required non-default `--apply_gpu_composites True` and offline INT4 calibration (`scripts/calibrate_int4.py`) to achieve the GPU numbers above.
 
 ## Quickstart
